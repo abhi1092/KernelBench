@@ -1,0 +1,8 @@
+vllm serve zai-org/GLM-4.7-Flash \
+     --tensor-parallel-size 4 \
+     --speculative-config.method mtp \
+     --speculative-config.num_speculative_tokens 1 \
+     --tool-call-parser glm47 \
+     --reasoning-parser glm45 \
+     --enable-auto-tool-choice \
+     --served-model-name glm-4.7-flash
