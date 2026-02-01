@@ -20,6 +20,8 @@ from importlib.resources import files, as_file
 # API clients
 from openai import OpenAI
 from litellm import completion
+import requests
+import uuid
 
 import numpy as np
 from contextlib import contextmanager
@@ -32,6 +34,9 @@ from functools import cache
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 SGLANG_KEY = os.environ.get("SGLANG_API_KEY")
+LANGFLOW_API_KEY = os.environ.get("LANGFLOW_API_KEY")
+LANGFLOW_BASE_URL = os.environ.get("LANGFLOW_BASE_URL", "http://localhost:3000")
+LANGFLOW_FLOW_ID = os.environ.get("LANGFLOW_FLOW_ID")
 
 
 ########################################################
@@ -54,7 +59,7 @@ def query_server(
     system_prompt: str = "You are a helpful assistant",  # only used for chat prompts
     temperature: float = 0.0,
     top_p: float = 1.0, # nucleus sampling
-    top_k: int = 50, 
+    top_k: int = 50,
     max_tokens: int = 128,  # max output tokens to generate
     num_completions: int = 1,
     server_port: int = 30000,  # only for local server hosted on SGLang
@@ -66,6 +71,7 @@ def query_server(
     is_reasoning_model: bool = False, # indiactor of using reasoning models
     budget_tokens: int = 0, # for claude thinking
     reasoning_effort: str = None, # only for o1 and o3 / more reasoning models in the future
+    **kwargs,  # For provider-specific parameters (e.g., Langflow config)
 ):
     """
     Query various sort of LLM inference API providers
@@ -104,7 +110,65 @@ def query_server(
             return outputs[0]
         else:
             return outputs
-    
+
+    # Langflow Agent - special handling
+    if server_type == "langflow":
+        # Extract configuration from kwargs or environment
+        langflow_base_url = kwargs.get("langflow_base_url", LANGFLOW_BASE_URL)
+        langflow_flow_id = kwargs.get("langflow_flow_id", LANGFLOW_FLOW_ID)
+        langflow_api_key = kwargs.get("langflow_api_key", LANGFLOW_API_KEY)
+
+        # Validate required parameters
+        if not langflow_base_url:
+            raise ValueError("Langflow base URL not provided. Set LANGFLOW_BASE_URL environment variable.")
+        if not langflow_flow_id:
+            raise ValueError("Langflow flow ID not provided. Set LANGFLOW_FLOW_ID environment variable.")
+        if not langflow_api_key:
+            raise ValueError("Langflow API key not provided. Set LANGFLOW_API_KEY environment variable.")
+
+        # Construct API endpoint
+        url = f"{langflow_base_url}/api/v1/run/{langflow_flow_id}"
+
+        # Convert prompt to string if it's a list of messages
+        if isinstance(prompt, list):
+            # Extract content from user and system messages
+            prompt_text = "\n".join([
+                msg["content"] for msg in prompt
+                if msg.get("role") in ["user", "system"]
+            ])
+        else:
+            prompt_text = prompt
+
+        # Prepare Langflow API payload
+        payload = {
+            "output_type": "chat",
+            "input_type": "chat",
+            "input_value": prompt_text,
+            "session_id": str(uuid.uuid4())
+        }
+
+        headers = {"x-api-key": langflow_api_key}
+
+        try:
+            # Send request to Langflow
+            response = requests.post(url, json=payload, headers=headers, timeout=300)
+            response.raise_for_status()
+
+            # Extract message from Langflow response structure
+            response_data = response.json()
+            message = response_data['outputs'][0]['outputs'][0]['outputs']['message']['message']
+
+            # Langflow doesn't support multiple completions
+            if num_completions > 1:
+                print(f"Warning: Langflow doesn't support multiple completions. Returning single completion.")
+
+            return message
+
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Langflow API request failed: {e}")
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(f"Failed to parse Langflow response: {e}. Response: {response.text if 'response' in locals() else 'N/A'}")
+
     # All other providers - use LiteLLM unified interface
     # Build messages list with system prompt first (if not already present)
     messages = []
@@ -208,6 +272,14 @@ SERVER_PRESETS = {
         "model_name": "fireworks_ai/llama-v3p1-70b-instruct",
         "temperature": 0.7,
         "max_tokens": 4096,
+    },
+    "langflow": {
+        "model_name": "langflow",  # Not used by Langflow, but needed for logging
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "langflow_base_url": LANGFLOW_BASE_URL,
+        "langflow_flow_id": LANGFLOW_FLOW_ID,
+        "langflow_api_key": LANGFLOW_API_KEY,
     },
 }
 
